@@ -210,23 +210,87 @@ class VideoSequenceDataset(Dataset):
     def _load_sequences(self, path: Path) -> List[List[Path]]:
         """Load sequence file lists"""
         sequences = []
+        
+        if not path.exists():
+            raise FileNotFoundError(f"Sequence file not found: {path}")
+        
+        # Check if this is a single image list file or a sequence list file
         try:
-            with open(path, 'r') as f:
-                for line in f:
-                    seq_file = line.strip().split()[0]
+            with open(path, 'r', encoding='utf-8', errors='strict') as f:
+                first_line = f.readline().strip()
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"File appears to be binary, not a text file: {path}\n"
+                f"Expected a text file containing either:\n"
+                f"  1. List of image paths (one per line), OR\n"
+                f"  2. List of sequence files (one per line)"
+            )
+        
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip()]
+            
+            if not lines:
+                raise ValueError(f"Sequence file is empty: {path}")
+            
+            # Check first file to determine format
+            first_file = self.root_dir / lines[0].split()[0]
+            
+            # If first file is an image, treat entire file as single sequence
+            if first_file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']:
+                logger.info(f"Detected single image list file")
+                images = []
+                for line in lines:
+                    img_path = self.root_dir / line.split()[0]
+                    if not img_path.exists():
+                        logger.warning(f"Image not found: {img_path}")
+                        continue
+                    images.append(img_path)
+                
+                if images:
+                    sequences.append(images)
+                    logger.info(f"Loaded 1 sequence with {len(images)} images")
+            
+            # Otherwise, treat as list of sequence files
+            else:
+                logger.info(f"Detected sequence list file")
+                for line in lines:
+                    seq_file = line.split()[0]
                     seq_path = self.root_dir / seq_file
+                    
+                    if not seq_path.exists():
+                        logger.warning(f"Sequence file not found: {seq_path}")
+                        continue
                     
                     # Load images in this sequence
                     images = []
-                    with open(seq_path, 'r') as seq_f:
-                        for img_line in seq_f:
-                            img_path = self.root_dir / img_line.strip().split()[0]
-                            images.append(img_path)
-                    sequences.append(images)
+                    try:
+                        with open(seq_path, 'r', encoding='utf-8') as seq_f:
+                            for img_line in seq_f:
+                                img_line = img_line.strip()
+                                if not img_line:
+                                    continue
+                                img_path = self.root_dir / img_line.split()[0]
+                                if not img_path.exists():
+                                    logger.warning(f"Image not found: {img_path}")
+                                    continue
+                                images.append(img_path)
+                    except Exception as e:
+                        logger.error(f"Error reading sequence file {seq_path}: {e}")
+                        continue
+                    
+                    if images:
+                        sequences.append(images)
+                
+                logger.info(f"Loaded {len(sequences)} sequences")
+        
         except Exception as e:
             logger.error(f"Error loading sequences: {e}")
             raise
-            
+        
+        if not sequences:
+            raise ValueError(f"No valid sequences found in {path}")
+        
         return sequences
     
     def _load_and_preprocess_image(self, path: Path) -> torch.Tensor:
@@ -431,18 +495,37 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description='Modern PredNet implementation in PyTorch',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+File Format Examples:
+  
+  1. Single image list (--images):
+     path/to/image001.jpg
+     path/to/image002.jpg
+     path/to/image003.jpg
+  
+  2. Sequence list (--sequences):
+     sequences/seq1.txt
+     sequences/seq2.txt
+     
+     Where each sequence file contains:
+     path/to/seq1/image001.jpg
+     path/to/seq1/image002.jpg
+     ...
+        """
     )
     
     parser.add_argument('--config', type=str, help='Path to config YAML file')
-    parser.add_argument('--images', '-i', type=str, help='Path to image list file')
-    parser.add_argument('--sequences', '-seq', type=str, help='Path to sequence list file')
-    parser.add_argument('--root', '-r', type=str, default='.', help='Root directory')
+    parser.add_argument('--images', '-i', type=str, help='Path to image list file (single sequence)')
+    parser.add_argument('--sequences', '-seq', type=str, help='Path to sequence list file (multiple sequences)')
+    parser.add_argument('--root', '-r', type=str, default='.', help='Root directory for resolving relative paths')
     parser.add_argument('--output', '-o', type=str, default='output', help='Output directory')
     parser.add_argument('--checkpoint', type=str, help='Load from checkpoint')
-    parser.add_argument('--test', action='store_true', help='Test mode')
+    parser.add_argument('--test', action='store_true', help='Test mode (no training)')
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu', 'auto'], 
                        default='auto', help='Device to use')
+    parser.add_argument('--validate-data', action='store_true', 
+                       help='Validate data files exist before starting')
     
     return parser.parse_args()
 
